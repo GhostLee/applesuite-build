@@ -1,0 +1,6 @@
+.local/
+*.key
+*.p12
+*.ipa
+*.log
+output/

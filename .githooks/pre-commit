@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+expected='GhostLee <8407671+GhostLee@users.noreply.github.com>'
+for role in AUTHOR COMMITTER; do
+    identity=$(git var "GIT_${role}_IDENT")
+    case "$identity" in
+        "$expected "*) ;;
+        *)
+            echo "Commit blocked: use the repository privacy identity documented in README.md." >&2
+            exit 1
+            ;;
+    esac
+done

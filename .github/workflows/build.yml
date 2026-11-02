@@ -1,0 +1,80 @@
+name: Build encrypted iOS package
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full commit SHA in the private source repository
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-ios-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - name: Check out build scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Prepare isolated build
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          mkdir -p "$RUNNER_TEMP/private-output" "$RUNNER_TEMP/public-output"
+          if ! brew list openssl@3 >/dev/null 2>&1; then
+            brew install openssl@3 >"$RUNNER_TEMP/private-output/toolchain.log" 2>&1
+          fi
+          echo "OPENSSL=$(brew --prefix openssl@3)/bin/openssl" >> "$GITHUB_ENV"
+
+      - name: Fetch private source without public diagnostics
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_DEPLOY_KEY: ${{ secrets.SOURCE_DEPLOY_KEY }}
+        run: |
+          bash scripts/fetch-source.sh >"$RUNNER_TEMP/private-output/fetch.log" 2>&1
+
+      - name: Test and build privately
+        id: compile
+        run: |
+          bash scripts/build.sh >"$RUNNER_TEMP/private-output/build-driver.log" 2>&1
+
+      - name: Encrypt package and diagnostics
+        if: ${{ always() && env.OPENSSL != '' }}
+        run: |
+          tar -czf "$RUNNER_TEMP/private-output.tar.gz" -C "$RUNNER_TEMP/private-output" .
+          "$OPENSSL" cms -encrypt -binary -aes-256-gcm \
+            -in "$RUNNER_TEMP/private-output.tar.gz" \
+            -out "$RUNNER_TEMP/public-output/build.cms" -outform DER \
+            -recip recipient.pem \
+            -keyopt rsa_padding_mode:oaep -keyopt rsa_oaep_md:sha256
+          cd "$RUNNER_TEMP/public-output"
+          shasum -a 256 build.cms > SHA256SUMS
+
+      - name: Upload encrypted output
+        if: ${{ always() && env.OPENSSL != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: encrypted-ios-build
+          path: ${{ runner.temp }}/public-output/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Clean up private workspace
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/private-source" "$RUNNER_TEMP/private-output"
+          rm -f "$RUNNER_TEMP/private-output.tar.gz" "$RUNNER_TEMP/source-deploy-key"
